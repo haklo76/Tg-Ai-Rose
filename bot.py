@@ -12,6 +12,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# Environment variables
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -577,21 +579,19 @@ def format_duration(seconds):
         minutes = seconds // 60
         return f"{minutes} minute{'s' if minutes > 1 else ''}"
 
-@app.route('/')
-def home():
-    return "🌹 Rose Admin Bot with Private AI is running!"
-
-# ==================== MAIN ====================
+# ==================== KOYEB DEPLOYMENT READY ====================
 
 if __name__ == "__main__":
     if BOT_TOKEN:
-        import threading
-        threading.Thread(target=lambda: app.run(host='0.0.0.0', port=8000, debug=False)).start()
-        
-        logger.info("🌹 Rose Admin Bot with Private AI Starting...")
-        logger.info("✅ All admin features activated!")
-        logger.info("🧠 Private AI ready for authorized users!")
-        logger.info("🌹 Rose keywords ready!")
-        bot.polling(none_stop=True)
+        logger.info("🌹 Rose Admin Bot Starting on Koyeb...")
+        # Auto-restart if crash for Koyeb deployment
+        while True:
+            try:
+                logger.info("🤖 Bot polling started...")
+                bot.infinity_polling(timeout=60, long_polling_timeout=60)
+            except Exception as e:
+                logger.error(f"❌ Bot error: {e}")
+                logger.info("🔄 Restarting bot in 10 seconds...")
+                time.sleep(10)  # Wait 10 seconds before restart
     else:
-        logger.error("❌ BOT_TOKEN not found!")
+        logger.error("❌ BOT_TOKEN not found in environment variables!")
