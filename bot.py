@@ -6,17 +6,27 @@ import random
 import time
 import requests
 from telebot import types
+import threading
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Environment variables
+# Environment variables for Koyeb
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-bot = telebot.TeleBot(BOT_TOKEN)
+
+if BOT_TOKEN:
+    bot = telebot.TeleBot(BOT_TOKEN)
+    logger.info("✅ Bot instance created successfully")
+else:
+    bot = None
+    logger.error("❌ BOT_TOKEN not found in environment variables!")
 
 # Store for warnings
 user_warnings = {}
@@ -28,6 +38,7 @@ def get_authorized_users():
     """Get authorized user IDs from environment variable"""
     authorized_ids = os.environ.get('AUTHORIZED_USER_IDS', '').strip()
     if not authorized_ids:
+        logger.warning("⚠️ No authorized users configured")
         return []
     return [id.strip() for id in authorized_ids.split(',')]
 
@@ -36,7 +47,9 @@ def is_authorized_ai_user(message):
     # Private chat only - check authorized users
     if message.chat.type == 'private':
         authorized_users = get_authorized_users()
-        return str(message.from_user.id) in authorized_users
+        is_authorized = str(message.from_user.id) in authorized_users
+        logger.info(f"🔐 AI Authorization check: User {message.from_user.id} - {'Authorized' if is_authorized else 'Not Authorized'}")
+        return is_authorized
     
     # Group chat - AI disabled
     return False
@@ -61,9 +74,11 @@ def is_user_admin_or_owner(bot, message):
         user_id = message.from_user.id
         chat_id = message.chat.id
         user_member = bot.get_chat_member(chat_id, user_id)
-        return user_member.status in ['administrator', 'creator']
+        is_admin = user_member.status in ['administrator', 'creator']
+        logger.info(f"🛡️ Admin check: User {user_id} - {'Admin' if is_admin else 'Not Admin'}")
+        return is_admin
     except Exception as e:
-        logger.error(f"Admin check error: {e}")
+        logger.error(f"❌ Admin check error: {e}")
         return False
 
 def admin_or_owner_required(func):
@@ -85,8 +100,10 @@ def ask_gemini(question):
     """Private AI function for authorized users only"""
     try:
         if not GEMINI_API_KEY:
+            logger.error("❌ Gemini API Key not configured")
             return "❌ Gemini API Key not configured"
         
+        logger.info(f"🧠 Asking Gemini: {question[:50]}...")
         url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         
         data = {
@@ -99,18 +116,24 @@ def ask_gemini(question):
         
         if response.status_code == 200:
             result = response.json()
-            return result["candidates"][0]["content"]["parts"][0]["text"]
+            response_text = result["candidates"][0]["content"]["parts"][0]["text"]
+            logger.info("✅ Gemini response received successfully")
+            return response_text
         else:
+            logger.error(f"❌ Gemini API Error: {response.status_code} - {response.text}")
             return f"❌ API Error: {response.status_code}"
             
     except Exception as e:
+        logger.error(f"❌ Gemini request failed: {str(e)}")
         return f"❌ Request failed: {str(e)}"
 
 def generate_image(description):
     """Private image generation for authorized users only"""
     try:
+        logger.info(f"🎨 Image generation requested: {description}")
         return f"🎨 **Image Generation:** {description}\n\nThis feature will be available soon! {random.choice(ROSES)}"
     except Exception as e:
+        logger.error(f"❌ Image generation error: {str(e)}")
         return f"❌ Image generation not available yet: {str(e)}"
 
 # ==================== COMMAND HANDLERS ====================
@@ -118,6 +141,7 @@ def generate_image(description):
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     user_name = message.from_user.first_name
+    logger.info(f"👋 Welcome command from {user_name} (ID: {message.from_user.id}) in {message.chat.type}")
     
     if message.chat.type == 'private':
         if is_authorized_ai_user(message):
@@ -213,12 +237,22 @@ def ai_command(message):
             return
         
         question = ' '.join(message.text.split()[1:])
-        bot.reply_to(message, f"🧠 *Thinking...* {random.choice(ROSES)}", parse_mode='Markdown')
+        logger.info(f"🧠 AI question from {message.from_user.id}: {question}")
+        
+        processing_msg = bot.reply_to(message, f"🧠 *Thinking...* {random.choice(ROSES)}", parse_mode='Markdown')
         
         response = ask_gemini(question)
+        
+        # Delete the "Thinking..." message
+        try:
+            bot.delete_message(message.chat.id, processing_msg.message_id)
+        except:
+            pass
+        
         bot.reply_to(message, f"🧠 *AI Response:*\n\n{response}", parse_mode='Markdown')
         
     except Exception as e:
+        logger.error(f"❌ AI command error: {str(e)}")
         bot.reply_to(message, f"❌ AI Error: {str(e)}")
 
 @bot.message_handler(commands=['image'])
@@ -241,10 +275,13 @@ def image_command(message):
             return
         
         description = ' '.join(message.text.split()[1:])
+        logger.info(f"🎨 Image generation from {message.from_user.id}: {description}")
+        
         response = generate_image(description)
         bot.reply_to(message, response, parse_mode='Markdown')
         
     except Exception as e:
+        logger.error(f"❌ Image command error: {str(e)}")
         bot.reply_to(message, f"❌ Image Error: {str(e)}")
 
 # ==================== ADMIN COMMANDS ====================
@@ -267,6 +304,8 @@ def mute_user(message):
         user_id = message.reply_to_message.from_user.id
         user_name = message.reply_to_message.from_user.first_name
         chat_id = message.chat.id
+        
+        logger.info(f"🔇 Mute command for {user_name} (ID: {user_id}) in chat {chat_id}")
         
         # Check if trying to mute admin/owner
         target_member = bot.get_chat_member(chat_id, user_id)
@@ -315,9 +354,11 @@ def mute_user(message):
         
         # Success message
         time_display = format_duration(mute_seconds)
+        logger.info(f"✅ Successfully muted {user_name} for {time_display}")
         bot.reply_to(message, f"🔇 {random.choice(ROSES)} *{user_name} muted for {time_display}!*", parse_mode='Markdown')
         
     except Exception as e:
+        logger.error(f"❌ Mute failed: {str(e)}")
         bot.reply_to(message, f"❌ Mute failed: {str(e)}")
 
 @bot.message_handler(commands=['unmute'])
@@ -335,6 +376,8 @@ def unmute_user(message):
             user_name = message.reply_to_message.from_user.first_name
             chat_id = message.chat.id
             
+            logger.info(f"🎤 Unmute command for {user_name} (ID: {user_id})")
+            
             # Restore permissions
             permissions = types.ChatPermissions(
                 can_send_messages=True,
@@ -348,11 +391,13 @@ def unmute_user(message):
             )
             
             bot.restrict_chat_member(chat_id, user_id, permissions)
+            logger.info(f"✅ Successfully unmuted {user_name}")
             bot.reply_to(message, f"🎤 {random.choice(ROSES)} *{user_name} unmuted!*", parse_mode='Markdown')
         else:
             bot.reply_to(message, f"{random.choice(ROSES)} *Reply to a user to unmute!*", parse_mode='Markdown')
             
     except Exception as e:
+        logger.error(f"❌ Unmute failed: {str(e)}")
         bot.reply_to(message, f"❌ Unmute failed: {str(e)}")
 
 # ==================== WARNING SYSTEM ====================
@@ -366,6 +411,8 @@ def warn_user(message):
             user_id = message.reply_to_message.from_user.id
             user_name = message.reply_to_message.from_user.first_name
             
+            logger.info(f"⚠️ Warn command for {user_name} (ID: {user_id})")
+            
             # Initialize warnings
             if user_id not in user_warnings:
                 user_warnings[user_id] = 0
@@ -374,13 +421,16 @@ def warn_user(message):
             warnings = user_warnings[user_id]
             
             if warnings >= 3:
+                logger.info(f"🔨 {user_name} reached 3 warnings!")
                 bot.reply_to(message, f"🔨 {random.choice(ROSES)} *{user_name} has 3 warnings!*", parse_mode='Markdown')
             else:
+                logger.info(f"⚠️ {user_name} warned ({warnings}/3)")
                 bot.reply_to(message, f"⚠️ {random.choice(ROSES)} *{user_name} warned! ({warnings}/3)*", parse_mode='Markdown')
         else:
             bot.reply_to(message, f"{random.choice(ROSES)} *Reply to a user to warn!*", parse_mode='Markdown')
             
     except Exception as e:
+        logger.error(f"❌ Warn failed: {str(e)}")
         bot.reply_to(message, f"❌ Warn failed: {str(e)}")
 
 @bot.message_handler(commands=['warnings'])
@@ -392,10 +442,12 @@ def check_warnings(message):
             user_id = message.reply_to_message.from_user.id
             user_name = message.reply_to_message.from_user.first_name
             warnings = user_warnings.get(user_id, 0)
+            logger.info(f"📊 Warning check for {user_name}: {warnings}/3")
             bot.reply_to(message, f"⚠️ {random.choice(ROSES)} *{user_name} has {warnings}/3 warnings*", parse_mode='Markdown')
         else:
             bot.reply_to(message, f"{random.choice(ROSES)} *Reply to a user to check warnings!*", parse_mode='Markdown')
     except Exception as e:
+        logger.error(f"❌ Check warnings failed: {str(e)}")
         bot.reply_to(message, f"❌ Check warnings failed: {str(e)}")
 
 # ==================== BAN COMMANDS ====================
@@ -412,10 +464,13 @@ def ban_user(message):
             
         if message.reply_to_message:
             user_name = message.reply_to_message.from_user.first_name
+            user_id = message.reply_to_message.from_user.id
+            logger.info(f"🔨 Ban command for {user_name} (ID: {user_id})")
             bot.reply_to(message, f"🔨 {random.choice(ROSES)} *{user_name} would be banned!*", parse_mode='Markdown')
         else:
             bot.reply_to(message, f"{random.choice(ROSES)} *Reply to a user to ban!*", parse_mode='Markdown')
     except Exception as e:
+        logger.error(f"❌ Ban failed: {str(e)}")
         bot.reply_to(message, f"❌ Ban failed: {str(e)}")
 
 @bot.message_handler(commands=['kick'])
@@ -425,10 +480,13 @@ def kick_user(message):
     try:
         if message.reply_to_message:
             user_name = message.reply_to_message.from_user.first_name
+            user_id = message.reply_to_message.from_user.id
+            logger.info(f"👢 Kick command for {user_name} (ID: {user_id})")
             bot.reply_to(message, f"👢 {random.choice(ROSES)} *{user_name} would be kicked!*", parse_mode='Markdown')
         else:
             bot.reply_to(message, f"{random.choice(ROSES)} *Reply to a user to kick!*", parse_mode='Markdown')
     except Exception as e:
+        logger.error(f"❌ Kick failed: {str(e)}")
         bot.reply_to(message, f"❌ Kick failed: {str(e)}")
 
 # ==================== MESSAGE MANAGEMENT ====================
@@ -439,10 +497,12 @@ def delete_message(message):
     """Delete message - Group admin only"""
     try:
         if message.reply_to_message:
+            logger.info(f"🗑️ Delete message command in chat {message.chat.id}")
             bot.reply_to(message, f"🗑️ {random.choice(ROSES)} *Message would be deleted!*", parse_mode='Markdown')
         else:
             bot.reply_to(message, f"{random.choice(ROSES)} *Reply to a message to delete!*", parse_mode='Markdown')
     except Exception as e:
+        logger.error(f"❌ Delete failed: {str(e)}")
         bot.reply_to(message, f"❌ Delete failed: {str(e)}")
 
 # ==================== INFO COMMANDS ====================
@@ -455,21 +515,26 @@ def user_info(message):
             user = message.reply_to_message.from_user
             user_name = user.first_name or "No Name"
             user_id = user.id
+            logger.info(f"👤 User info for {user_name} (ID: {user_id})")
             bot.reply_to(message, f"👤 {random.choice(ROSES)} *{user_name}* \n🆔 `{user_id}`", parse_mode='Markdown')
         else:
             user = message.from_user
             user_name = user.first_name or "No Name"
             user_id = user.id
+            logger.info(f"👤 Self user info for {user_name} (ID: {user_id})")
             bot.reply_to(message, f"👤 {random.choice(ROSES)} *{user_name}* \n🆔 `{user_id}`", parse_mode='Markdown')
     except Exception as e:
+        logger.error(f"❌ User info failed: {str(e)}")
         bot.reply_to(message, f"❌ User info failed: {str(e)}")
 
 @bot.message_handler(commands=['admins'])
 def list_admins(message):
     """List admins - Available for everyone"""
     try:
+        logger.info(f"⭐ Admin list command in chat {message.chat.id}")
         bot.reply_to(message, f"⭐ {random.choice(ROSES)} *Admin list would be shown!*", parse_mode='Markdown')
     except Exception as e:
+        logger.error(f"❌ Admin list failed: {str(e)}")
         bot.reply_to(message, f"❌ Admin list failed: {str(e)}")
 
 # ==================== ROSE KEYWORD RESPONSES ====================
@@ -579,19 +644,80 @@ def format_duration(seconds):
         minutes = seconds // 60
         return f"{minutes} minute{'s' if minutes > 1 else ''}"
 
-# ==================== KOYEB DEPLOYMENT READY ====================
+# ==================== FLASK ROUTES FOR KOYEB ====================
+
+@app.route('/')
+def home():
+    return "🌹 Rose Admin Bot - Combined Service is Running on Koyeb!"
+
+@app.route('/health')
+def health():
+    return "✅ OK", 200
+
+@app.route('/status')
+def status():
+    bot_status = "✅ Running" if BOT_TOKEN else "❌ Not Configured"
+    gemini_status = "✅ Configured" if GEMINI_API_KEY else "❌ Not Configured"
+    return f"""
+🤖 Bot Status: {bot_status}
+🧠 Gemini API: {gemini_status}
+🌹 Service: ✅ Running on Koyeb
+"""
+
+# ==================== BOT RUNNER ====================
+
+def run_bot():
+    """Run Telegram bot with auto-restart"""
+    if not BOT_TOKEN:
+        logger.error("❌ Cannot start bot: BOT_TOKEN not found!")
+        return
+    
+    logger.info("🌹 Starting Rose Admin Bot on Koyeb...")
+    logger.info(f"✅ BOT_TOKEN: {'Set' if BOT_TOKEN else 'Missing'}")
+    logger.info(f"✅ GEMINI_API_KEY: {'Set' if GEMINI_API_KEY else 'Missing'}")
+    
+    restart_count = 0
+    max_restarts = 5
+    
+    while restart_count < max_restarts:
+        try:
+            logger.info(f"🤖 Bot polling started (Attempt {restart_count + 1})...")
+            bot.infinity_polling(
+                timeout=60, 
+                long_polling_timeout=60,
+                logger_level=logging.INFO
+            )
+            
+        except Exception as e:
+            restart_count += 1
+            logger.error(f"❌ Bot polling error: {e}")
+            
+            if restart_count < max_restarts:
+                wait_time = 10 * restart_count
+                logger.info(f"🔄 Restarting bot in {wait_time} seconds... (Restart #{restart_count})")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"❌ Max restarts reached ({max_restarts}). Stopping bot.")
+                break
+
+def run_web():
+    """Run Flask web server"""
+    port = int(os.environ.get('PORT', 8000))
+    logger.info(f"🌐 Starting Flask web server on port {port}...")
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+# ==================== MAIN EXECUTION ====================
 
 if __name__ == "__main__":
+    logger.info("🚀 Starting Rose Admin Bot Service on Koyeb...")
+    
+    # Start bot in a separate thread if BOT_TOKEN is available
     if BOT_TOKEN:
-        logger.info("🌹 Rose Admin Bot Starting on Koyeb...")
-        # Auto-restart if crash for Koyeb deployment
-        while True:
-            try:
-                logger.info("🤖 Bot polling started...")
-                bot.infinity_polling(timeout=60, long_polling_timeout=60)
-            except Exception as e:
-                logger.error(f"❌ Bot error: {e}")
-                logger.info("🔄 Restarting bot in 10 seconds...")
-                time.sleep(10)  # Wait 10 seconds before restart
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
+        logger.info("✅ Bot thread started successfully")
     else:
-        logger.error("❌ BOT_TOKEN not found in environment variables!")
+        logger.warning("⚠️ Bot thread not started - BOT_TOKEN missing")
+    
+    # Start web server in main thread (required for Koyeb)
+    run_web()
